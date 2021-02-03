@@ -80,6 +80,7 @@ async fn process_socket(mut sock: TcpStream) -> Result<()> {
     let mut gw = 1024;
     let mut gh = 768;
     let mut colour = 0u8;
+    let mut colourup = true;
 
     let mut screenbuf = Vec::with_capacity(4 * gh as usize * gw as usize);
     let mut lastdraw = when();
@@ -236,8 +237,22 @@ async fn process_socket(mut sock: TcpStream) -> Result<()> {
 
                     let now = when();
                     let delta = now - lastdraw;
-                    colour = colour.overflowing_add(delta as u8).0;
-                    lastdraw = now;
+                    if delta > 4 {
+                        for _ in 0..(delta / 4) {
+                            if colourup {
+                                colour += 1;
+                                if colour > 240 {
+                                    colourup = false;
+                                }
+                            } else {
+                                colour -= 1;
+                                if colour < 10 {
+                                    colourup = true;
+                                }
+                            }
+                        }
+                        lastdraw = now;
+                    }
                 }
             }
             4 => {
