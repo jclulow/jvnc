@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use std::time::Duration;
 use tokio::time::{Instant, sleep_until};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 mod framebuffer;
 mod rfb;
@@ -14,8 +15,12 @@ fn sleep_ms(ms: u64) {
     std::thread::sleep(std::time::Duration::from_millis(ms));
 }
 
-fn spawn_draw(fb: &Arc<framebuffer::Framebuffer>) -> Result<()> {
+fn spawn_draw(
+    cc: &Arc<AtomicU32>,
+    fb: &Arc<framebuffer::Framebuffer>
+) -> Result<()> {
     let fb = Arc::clone(fb);
+    let cc = Arc::clone(cc);
     std::thread::Builder::new()
         .name("draw".to_string())
         .spawn(move || {
@@ -37,7 +42,14 @@ fn spawn_draw(fb: &Arc<framebuffer::Framebuffer>) -> Result<()> {
                         if c % pitch < (pitch / 2) {
                             fb.put(x, y, 0, 0, 0);
                         } else {
-                            fb.put(x, y, 0, 0, colour);
+                            match cc.load(Ordering::Relaxed) {
+                                0 => fb.put(x, y, 0, 0, 0),
+                                1 => fb.put(x, y, colour, colour, colour),
+                                2 => fb.put(x, y, colour, 0, 0),
+                                3 => fb.put(x, y, 0, colour, 0),
+                                4 => fb.put(x, y, 0, 0, colour),
+                                _ => (),
+                            }
                         }
                         c += 1;
                     }
@@ -66,6 +78,7 @@ fn spawn_draw(fb: &Arc<framebuffer::Framebuffer>) -> Result<()> {
 async fn process_socket(
     fb: &Arc<framebuffer::Framebuffer>,
     mut sock: TcpStream,
+    cc: &Arc<AtomicU32>,
 ) -> Result<()> {
     let (r, mut w) = sock.split();
     let rfb = rfb::read_stream(r);
@@ -241,6 +254,26 @@ async fn process_socket(
                         println!("q is for quit!");
                         return Ok(());
                     }
+                    Frame::KeyEvent(down, key) if down == 1 && key == 122 => {
+                        println!("z is for black!");
+                        cc.store(0, Ordering::Relaxed);
+                    }
+                    Frame::KeyEvent(down, key) if down == 1 && key == 119 => {
+                        println!("w is for white!");
+                        cc.store(1, Ordering::Relaxed);
+                    }
+                    Frame::KeyEvent(down, key) if down == 1 && key == 114 => {
+                        println!("r is for red!");
+                        cc.store(2, Ordering::Relaxed);
+                    }
+                    Frame::KeyEvent(down, key) if down == 1 && key == 103 => {
+                        println!("g is for green!");
+                        cc.store(3, Ordering::Relaxed);
+                    }
+                    Frame::KeyEvent(down, key) if down == 1 && key == 98 => {
+                        println!("b is for blue!");
+                        cc.store(4, Ordering::Relaxed);
+                    }
                     f => {
                         println!("f: {:?}", f);
                     }
@@ -255,10 +288,15 @@ async fn main() -> Result<()> {
     let listener = TcpListener::bind("0.0.0.0:5915").await?;
 
     /*
+     * Colour coordination:
+     */
+    let cc = Arc::new(AtomicU32::new(4));
+
+    /*
      * Spawn the simulated framebuffer:
      */
     let fb = Arc::new(framebuffer::Framebuffer::new(512, 384));
-    spawn_draw(&fb)?;
+    spawn_draw(&cc, &fb)?;
 
     let mut c = 0;
     loop {
@@ -267,8 +305,9 @@ async fn main() -> Result<()> {
         println!("[{}] accept: {:?}", c, addr);
 
         let fb = Arc::clone(&fb);
+        let cc = Arc::clone(&cc);
         tokio::spawn(async move {
-            let res = process_socket(&fb, socket).await;
+            let res = process_socket(&fb, socket, &cc).await;
             println!("[{}] connection done: {:?}", c, res);
             println!();
         });
