@@ -66,6 +66,7 @@ impl Framebuffer {
         ((pix >> 16) as u8, (pix >> 8) as u8, pix as u8)
     }
 
+    #[allow(dead_code)]
     pub fn copy_all(&self) -> Vec<u8> {
         let ncells = self.width.checked_mul(self.height).unwrap();
         let size = ncells.checked_mul(self.pixelsize).unwrap();

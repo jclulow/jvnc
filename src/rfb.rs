@@ -1,14 +1,10 @@
-use tokio::net::{TcpListener, TcpStream, tcp::ReadHalf};
-use tokio::io::AsyncReadExt;
+use std::io::{Result, Error, ErrorKind};
 
 use async_stream::try_stream;
+use bytes::{BytesMut, Buf};
 use futures_core::stream::Stream;
-
-use std::io;
-use std::io::Cursor;
-use std::net::SocketAddr;
-
-use bytes::{BytesMut, Buf, BufMut};
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::ReadHalf;
 
 trait SighFactoryExt {
     fn peek_u16(&self, offset: usize) -> Option<u16>;
@@ -87,9 +83,8 @@ struct Rfb {
     state: State,
 }
 
-fn fail_<T>(msg: &str) -> io::Result<T> {
-    let e = io::Error::new(io::ErrorKind::Other, msg.to_string());
-    Err(e)
+fn fail_<T>(msg: &str) -> Result<T> {
+    Err(Error::new(ErrorKind::Other, msg.to_string()))
 }
 
 impl Rfb {
@@ -102,7 +97,7 @@ impl Rfb {
         }
     }
 
-    fn fail<T>(&mut self, msg: &str) -> io::Result<T> {
+    fn fail<T>(&mut self, msg: &str) -> Result<T> {
         if self.failed {
             return fail_("earlier failure");
         }
@@ -110,7 +105,7 @@ impl Rfb {
         return fail_(msg);
     }
 
-    fn parse(&mut self) -> io::Result<Option<Frame>> {
+    fn parse(&mut self) -> Result<Option<Frame>> {
         if self.failed {
             return self.fail("");
         }
@@ -276,7 +271,7 @@ impl Rfb {
         }
     }
 
-    async fn ingest(&mut self, r: &mut ReadHalf<'_>) -> io::Result<()> {
+    async fn ingest(&mut self, r: &mut ReadHalf<'_>) -> Result<()> {
         if self.eof {
             /*
              * XXX
@@ -293,7 +288,7 @@ impl Rfb {
 }
 
 pub fn read_stream<'a>(r: ReadHalf<'a>)
-    -> impl Stream<Item = io::Result<Frame>> + 'a
+    -> impl Stream<Item = Result<Frame>> + 'a
 {
     try_stream! {
         tokio::pin!(r);

@@ -3,18 +3,12 @@ use tokio::net::{TcpListener, TcpStream};
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use std::time::Duration;
+use tokio::time::{Instant, sleep_until};
 
 mod framebuffer;
 mod rfb;
-use rfb::{Frame, Security, Access};
-
-fn when() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
-        as u64
-}
+use rfb::{Frame, Security, UpdateRequest};
 
 fn sleep_ms(ms: u64) {
     std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -27,44 +21,49 @@ fn spawn_draw(fb: &Arc<framebuffer::Framebuffer>) -> Result<()> {
         .spawn(move || {
             let mut colour = 0u8;
             let mut colourup = true;
-            let mut lastdraw = when();
+
+            /*
+             * Make a tartan of alternating colours with squares of this size:
+             */
+            let pitch = 16;
 
             loop {
                 /*
                  * Put breathing blue everywhere:
                  */
                 for y in 0..fb.height() {
+                    let mut c = (y % pitch < pitch / 2) as usize * (pitch / 2);
                     for x in 0..fb.width() {
-                        fb.put(x, y, 0, 0, colour);
+                        if c % pitch < (pitch / 2) {
+                            fb.put(x, y, 0, 0, 0);
+                        } else {
+                            fb.put(x, y, 0, 0, colour);
+                        }
+                        c += 1;
                     }
                 }
 
-                let now = when();
-                let delta = now - lastdraw;
-                if delta > 4 {
-                    for _ in 0..(delta / 4) {
-                        if colourup {
-                            colour += 1;
-                            if colour > 240 {
-                                colourup = false;
-                            }
-                        } else {
-                            colour -= 1;
-                            if colour < 10 {
-                                colourup = true;
-                            }
+                for _ in 0..8 {
+                    if colourup {
+                        colour += 1;
+                        if colour > 240 {
+                            colourup = false;
+                        }
+                    } else {
+                        colour -= 1;
+                        if colour < 10 {
+                            colourup = true;
                         }
                     }
-                    lastdraw = now;
                 }
 
-                sleep_ms(1000 / 30);
+                sleep_ms(50);
             }
         })?;
     Ok(())
 }
 
-async fn process_socket2(
+async fn process_socket(
     fb: &Arc<framebuffer::Framebuffer>,
     mut sock: TcpStream,
 ) -> Result<()> {
@@ -165,12 +164,15 @@ async fn process_socket2(
     let buf = b"jvnc";
     w.write_all(buf).await?;
 
-    /*
-     * Process incoming messages:
-     */
-    while let Some(f) = rfb.next().await.transpose()? {
-        match f {
-            Frame::FramebufferUpdateRequest(ur) => {
+    let mut draw: Option<UpdateRequest> = None;
+    let mut drawtime = Instant::now();
+    let fps = 12;
+
+    loop {
+        tokio::select! {
+            _ = sleep_until(drawtime), if draw.is_some() => {
+                let ur = draw.take().unwrap();
+
                 /*
                  * Fashion some pixel data for the client...
                  */
@@ -179,25 +181,73 @@ async fn process_socket2(
 
                 w.write_u16(1).await?; /* nrects */
 
-                w.write_u16(0).await?; /* xpos */
-                w.write_u16(0).await?; /* ypos */
-                w.write_u16(fb.width() as u16).await?; /* width */
-                w.write_u16(fb.height() as u16).await?; /* height */
+                w.write_u16(ur.xpos as u16).await?; /* xpos */
+                w.write_u16(ur.ypos as u16).await?; /* ypos */
+                w.write_u16(ur.width as u16).await?; /* width */
+                w.write_u16(ur.height as u16).await?; /* height */
                 w.write_i32(0).await?; /* encoding: Raw */
 
-                w.write_all(&fb.copy_all()).await?;
+                let mut v = Vec::new();
+                for y in ur.ypos..(ur.ypos + ur.height) {
+                    for x in ur.xpos..(ur.xpos + ur.width) {
+                        let (r, g, b) = fb.get(x, y);
+                        v.push(b);
+                        v.push(g);
+                        v.push(r);
+                        v.push(0);
+                    }
+                }
+                w.write_all(&v).await?;
+
+                /*
+                 * Schedule the next draw cycle at the expected time
+                 * based on the target maximum frame rate:
+                 */
+                drawtime = Instant::now()
+                    .checked_add(Duration::from_millis(1000 / fps))
+                    .unwrap();
             }
-            Frame::KeyEvent(downflag, key) if downflag == 1 && key == 113 => {
-                println!("q is for quit!");
-                return Ok(());
-            }
-            f => {
-                println!("f: {:?}", f);
+            f = rfb.next() => {
+                let f = match f {
+                    Some(f) => f?,
+                    None => return Ok(()),
+                };
+
+                match f {
+                    Frame::FramebufferUpdateRequest(mut ur) => {
+                        /*
+                         * Make sure the update request is not out of bounds for
+                         * the actual framebuffer we have:
+                         */
+                        if ur.xpos >= fb.width() {
+                            ur.xpos = fb.width() - 1;
+                        }
+                        if ur.ypos >= fb.height() {
+                            ur.ypos = fb.height() - 1;
+                        }
+                        if ur.width > fb.width() {
+                            ur.width = fb.width();
+                        }
+                        if ur.height > fb.height() {
+                            ur.height = fb.height();
+                        }
+
+                        /*
+                         * Schedule a redraw at the next appropriate moment:
+                         */
+                        draw = Some(ur);
+                    }
+                    Frame::KeyEvent(down, key) if down == 1 && key == 113 => {
+                        println!("q is for quit!");
+                        return Ok(());
+                    }
+                    f => {
+                        println!("f: {:?}", f);
+                    }
+                }
             }
         }
     }
-
-    Ok(())
 }
 
 #[tokio::main]
@@ -218,7 +268,7 @@ async fn main() -> Result<()> {
 
         let fb = Arc::clone(&fb);
         tokio::spawn(async move {
-            let res = process_socket2(&fb, socket).await;
+            let res = process_socket(&fb, socket).await;
             println!("[{}] connection done: {:?}", c, res);
             println!();
         });
