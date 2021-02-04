@@ -80,13 +80,3 @@ impl Drop for Framebuffer {
         unsafe { dealloc(self.region, self.layout) };
     }
 }
-
-//pub struct Pixels {
-//    fb: &Framebuffer,
-//    pos: usize,
-//    fin: bool,
-//}
-//
-//impl Iterator for Pixels {
-//    type Item = u32;
-//}
